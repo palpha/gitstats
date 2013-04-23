@@ -8,16 +8,34 @@ module GitStats.Main
 open System
 open System.Diagnostics
 
-let runGit args =
+let collectOutput =
+    (fun (x:DataReceivedEventArgs) ->
+        printfn "%A" x.Data)
+
+let run cmd args wd =
     let psi = ProcessStartInfo ()
-    psi.FileName <- "git"
-    psi.Arguments <- "log"
-    psi.WorkingDirectory <- ""
-    let proc = Process ()
+    psi.FileName <- cmd
+    psi.Arguments <- "log --all --raw"
+    psi.WorkingDirectory <- wd
+    psi.CreateNoWindow <- true
+    psi.RedirectStandardOutput <- true
+    psi.UseShellExecute <- false
     
+    use proc = new Process ()
+    proc.StartInfo <- psi
+    use listener = proc.OutputDataReceived.Subscribe (collectOutput)
+    proc.EnableRaisingEvents <- true
+    proc.Start () |> ignore
+    proc.BeginOutputReadLine ()
+    
+    Async.AwaitEvent proc.Exited
+    |> Async.RunSynchronously
+    |> ignore
+    
+    Console.ReadLine () |> ignore
 
 [<EntryPoint>]
 let main args = 
-    Console.WriteLine("Hello world!")
+    run "/usr/local/bin/git" "" Environment.CurrentDirectory
     0
 
