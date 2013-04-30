@@ -150,12 +150,13 @@ type Commit =
             sprintf "Unable to build commit %s" !hash |> error
             reraise ()
 
-type CommitStats =
-    { commits : int
-      plus : int
+type FileStats =
+    { plus : int
       minus : int }
 
 type ActivityStats =
-    { first : DateTime
+    { commits : int
+      first : DateTime
       last : DateTime
-      activeDays : int }
+      dates : Set<DateTime>
+      files : IDictionary<string, FileStats> }

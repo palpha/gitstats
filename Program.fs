@@ -10,9 +10,24 @@ open System.Diagnostics
 open System.Collections.Generic
 open System.Collections.Concurrent
 open Microsoft.FSharp
-      
+open System.Threading
+
+let mutable doTime = false
+let timeSpent = ConcurrentDictionary<string, ConcurrentBag<int64>> ()
+let time x f =
+    match doTime with
+    | false -> f ()
+    | _ ->
+        let sw = Diagnostics.Stopwatch.StartNew ()
+        let result = f ()
+        sw.Stop ()
+        timeSpent.TryAdd (x, ConcurrentBag<int64> ()) |> ignore
+        timeSpent.[x].Add (sw.ElapsedMilliseconds)
+        result
+            
 let commitCollector =
-    let authorStats = ConcurrentDictionary<Author, CommitStats> ()
+    let activityStats = ConcurrentDictionary<Author, ActivityStats> ()
+    let allExts = ref (set [] : Set<string>)
     MailboxProcessor.Start (fun inbox ->
         let rec loop () = async {
             let! msg, (replyChan : AsyncReplyChannel<unit> option) = inbox.Receive ()
@@ -23,73 +38,109 @@ let commitCollector =
 
             match msg with
             | CollectInstruction.Data x ->
-                let commit = Commit.create x
-                let plus = commit.files |> Seq.filter (fun x -> x.plus.IsSome) |> Seq.sumBy (fun x -> x.plus.Value)
-                let minus = commit.files |> Seq.filter (fun x -> x.minus.IsSome) |> Seq.sumBy (fun x -> x.minus.Value)
-                authorStats.AddOrUpdate (
-                    commit.author,
-                    Func<_,_>(fun _ -> { commits = 1; plus = plus; minus = minus }),
-                    Func<_,_,_>(fun (_, x) -> (fun x -> { commits = x.commits + 1; plus = x.plus + plus; minus = x.minus + minus }))) // wtf?
-                |> ignore
-                sprintf "Collected %s" commit.hash |> info
-                reply ()
+                time "collect" (fun () ->
+                    let commit = Commit.create x
+                    
+                    let files =
+                        commit.files
+                        |> Seq.groupBy (fun x ->
+                            let m = Text.RegularExpressions.Regex.Match (x.path, @"\.([^/\.]+)$")
+                            if m.Success
+                            then m.Groups.[1].Value
+                            else "")
+                        |> Seq.map (fun (k, g) ->
+                            k,
+                            { plus = g |> Seq.choose (fun x -> x.plus) |> Seq.sum
+                              minus = g |> Seq.choose (fun x -> x.minus) |> Seq.sum })
+                        |> dict
+                        
+                    Interlocked.Exchange (allExts, files.Keys |> set |> Set.union !allExts) |> ignore
+                    
+                    activityStats.AddOrUpdate (
+                        commit.author,
+                        Func<_,_>(fun _ ->
+                            { commits = 1
+                              dates = set [ commit.timestamp.Date ]
+                              first = commit.timestamp.Date
+                              last = commit.timestamp.Date
+                              files = Dictionary<string, FileStats> (files) }),
+                        Func<_,_,_>(fun (_, x) -> (fun x ->
+                            { commits = x.commits + 1
+                              dates = x.dates |> Set.add commit.timestamp.Date
+                              first = commit.timestamp.Date
+                              last = commit.timestamp.Date
+                              files =
+                                x.files.Keys
+                                |> Seq.append files.Keys
+                                |> Seq.map (fun k ->
+                                    let get (x:IDictionary<string, FileStats>) =
+                                        match x.TryGetValue k with true, x -> x | _ -> { plus = 0; minus = 0 }
+                                    let xf = get x.files
+                                    let nf = get files
+                                    k, { plus = xf.plus + nf.plus; minus = xf.minus + nf.minus })
+                                |> dict })))
+                    |> ignore
+                    sprintf "Collected %s" commit.hash |> info
+                    reply ())
                 return! loop () // wait for next
             | CollectInstruction.Finished ->
                 "Done collecting." |> info
-                authorStats |> Seq.iter (fun x -> printfn "%s\n%A" (snd x.Key) x.Value)
+                activityStats |> Seq.iter (fun x -> printfn "%s\n%A" (snd x.Key) x.Value)
+                !allExts |> Seq.iter (printfn "%s")
                 reply ()
                 return () // break loop
         }
         loop ())
     
 let parse data =
-    match data with
-    | Regex "^commit (.+)$" [ hash ] ->
-        sprintf "  parsed hash %s" hash |> debug
-        Commit hash
-    | Regex "^Author: (.+?) <(.+)>$" [ name; email ] ->
-        sprintf "  parsed author %s %s" name email |> debug
-        Author (name, email)
-    | Regex @"^Date:\s+(.+?) (.+?) (\d+) (\d{2}:\d{2}:\d{2}) (\d+) ([-+]\d{2})(\d{2})" [ dow; mon; day; time; year; offsetH; offsetM ] ->
-        let dateStr =
-            sprintf "%s %s %s %s %s %s:%s"
-                dow mon day time year offsetH offsetM
-        let success, date =
-            DateTime.TryParseExact (
-                dateStr, "ddd MMM d HH:mm:ss yyyy zzz",
-                System.Globalization.CultureInfo.InvariantCulture,
-                System.Globalization.DateTimeStyles.None)
-        if success
-        then
-            sprintf "  parsed timestamp %s" <| date.ToString () |> debug
-            Timestamp date
-        else failwith "Could not parse date."
-    | Regex "^ {4}(.+)$" [ msg ] ->
-        sprintf "  parsed message %s" msg |> debug
-        Message msg
-    | Regex "^$" [] -> Blank
-    | Regex @"^:(\d+) (\d+) ([\da-f\.]+) ([\da-f\.]+) ([AMD])\s+(.+)" [ modeB; modeA; hashB; hashA; change; path ] ->
-        sprintf "  parsed file %s" path |> debug
-        File { path = path.Trim (); change = Change.parse change; mode = modeB, modeA; hash = hashB, hashA }
-    | Regex @"^(\d+)\s+(\d+)\s+(.+)$" [ plus; minus; path ] ->
-        sprintf "  parsed stat %s" path |> debug
-        let parseNum = function
-            | "-" -> None
-            | x -> Some <| int x
-            
-        let plus = parseNum plus
-        let minus = parseNum minus
-        let binary =
-            match plus, minus with
-            | None, None -> true
-            | Some _, Some _ -> false
-            | _ ->
-                sprintf "Could not parse stat %s" data |> warn
-                true
-        Stat { path = path.Trim (); binary = binary; plus = plus; minus = plus }
-    | _ ->
-        sprintf "  did not parse %s" data |> debug
-        Blank
+    time "parse" (fun () ->
+        match data with
+        | Regex "^commit (.+)$" [ hash ] ->
+            sprintf "  parsed hash %s" hash |> debug
+            Commit hash
+        | Regex "^Author: (.+?) <(.+)>$" [ name; email ] ->
+            sprintf "  parsed author %s %s" name email |> debug
+            Author (name, email)
+        | Regex @"^Date:\s+(.+?) (.+?) (\d+) (\d{2}:\d{2}:\d{2}) (\d+) ([-+]\d{2})(\d{2})" [ dow; mon; day; time; year; offsetH; offsetM ] ->
+            let dateStr =
+                sprintf "%s %s %s %s %s %s:%s"
+                    dow mon day time year offsetH offsetM
+            let success, date =
+                DateTime.TryParseExact (
+                    dateStr, "ddd MMM d HH:mm:ss yyyy zzz",
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None)
+            if success
+            then
+                sprintf "  parsed timestamp %s" <| date.ToString () |> debug
+                Timestamp date
+            else failwith "Could not parse date."
+        | Regex "^ {4}(.+)$" [ msg ] ->
+            sprintf "  parsed message %s" msg |> debug
+            Message msg
+        | Regex "^$" [] -> Blank
+        | Regex @"^:(\d+) (\d+) ([\da-f\.]+) ([\da-f\.]+) ([AMD])\s+(.+)" [ modeB; modeA; hashB; hashA; change; path ] ->
+            sprintf "  parsed file %s" path |> debug
+            File { path = path.Trim (); change = Change.parse change; mode = modeB, modeA; hash = hashB, hashA }
+        | Regex @"^(\d+)\s+(\d+)\s+(.+)$" [ plus; minus; path ] ->
+            sprintf "  parsed stat %s" path |> debug
+            let parseNum = function
+                | "-" -> None
+                | x -> Some <| int x
+                
+            let plus = parseNum plus
+            let minus = parseNum minus
+            let binary =
+                match plus, minus with
+                | None, None -> true
+                | Some _, Some _ -> false
+                | _ ->
+                    sprintf "Could not parse stat %s" data |> warn
+                    true
+            Stat { path = path.Trim (); binary = binary; plus = plus; minus = plus }
+        | _ ->
+            sprintf "  did not parse %s" data |> debug
+            Blank)
 
 let parser =
     MailboxProcessor.Start (fun inbox ->
@@ -134,9 +185,10 @@ let parser =
 
 let collectOutput =
     (fun (x:DataReceivedEventArgs) ->
-        match x.Data with
-        | null -> ()
-        | _ -> parser.Post (Data x.Data, None))
+        time "eventing" (fun () ->
+            match x.Data with
+            | null -> ()
+            | _ -> parser.Post (Data x.Data, None)))
 
 let run cmd args wd =
     let args = "log --all --raw --no-color --no-merges --numstat " + args
@@ -156,12 +208,14 @@ let run cmd args wd =
     proc.StartInfo <- psi
     use listener = proc.OutputDataReceived.Subscribe (collectOutput)
     proc.EnableRaisingEvents <- true
-    proc.Start () |> ignore
-    proc.BeginOutputReadLine ()
+    
+    time "git" (fun () ->
+        proc.Start () |> ignore
+        proc.BeginOutputReadLine ()
 
-    Async.AwaitEvent proc.Exited
-    |> Async.RunSynchronously
-    |> ignore
+        Async.AwaitEvent proc.Exited
+        |> Async.RunSynchronously
+        |> ignore)
     
     match proc.ExitCode with
     | 0 -> "Done running Git." |> info
@@ -190,32 +244,55 @@ let main args =
                     | Regex "^--$" [] -> loop xs ("--", []) (pushCurr ()) true
                     | _ -> loop xs (fst curr, x :: snd curr) acc false
         loop (args |> List.ofArray) ("", []) [] false
-    
-    if parsedArgs.ContainsKey "debug"
-    then
-        match parsedArgs.["debug"] with
-        | [] -> debugLvl := DebugLevel.Debug
-        | x::xs -> debugLvl := DebugLevel.parse x
-        
-    sprintf "%A" parsedArgs |> debug
 
-    let workingDir =        
-        if parsedArgs.[""] <> List.empty
-        then parsedArgs.[""] |> List.head
-        else Environment.CurrentDirectory
+    doTime <- parsedArgs.ContainsKey "time"
+
+    let f () =
+        if parsedArgs.ContainsKey "debug"
+        then
+            match parsedArgs.["debug"] with
+            | [] -> debugLvl := DebugLevel.Debug
+            | x::xs -> debugLvl := DebugLevel.parse x
+            
+        sprintf "Arguments: %A" parsedArgs |> debug
+
+        
+
+        let workingDir =        
+            if parsedArgs.[""] <> List.empty
+            then parsedArgs.[""] |> List.head
+            else Environment.CurrentDirectory
+        
+        commitCollector.Error.Add (fun e ->
+            sprintf "Commit collector failed: %A" e |> error
+            Environment.Exit 1)
+        
+        parser.Error.Add (fun e ->
+            sprintf "Parser failed: %A" e |> error
+            Environment.Exit 2)
+     
+        let gitArgs =   
+            if parsedArgs.ContainsKey "--"
+            then String.Join (" ", parsedArgs.["--"])
+            else ""
     
-    commitCollector.Error.Add (fun e ->
-        sprintf "Commit collector failed: %A" e |> error
-        Environment.Exit 1)
+        run "/usr/local/bin/git" gitArgs workingDir
     
-    parser.Error.Add (fun e ->
-        sprintf "Parser failed: %A" e |> error
-        Environment.Exit 2)
- 
-    let gitArgs =   
-        if parsedArgs.ContainsKey "--"
-        then String.Join (" ", parsedArgs.["--"])
-        else ""
-    run "/usr/local/bin/git" gitArgs workingDir
+    match doTime with
+    | false -> f ()
+    | _ ->
+        let sw = Diagnostics.Stopwatch.StartNew ()
+        
+        f ()
+
+        timeSpent.Keys
+        |> Seq.map (fun x -> x, timeSpent.[x])
+        |> Seq.filter (fun (_, x) -> x.Count > 0)
+        |> Seq.map (fun (x, l) -> x, l.Count, (l |> Seq.sum))
+        |> Seq.map (fun (x, c, s) -> x, c, s, (float s / float c))
+        |> Seq.iter (fun (k, c, s, a) -> printfn "%s: count %i, total %i, avg %f" k c s a)
+
+        printfn "Total time: %i" sw.ElapsedMilliseconds
+
     0
 
