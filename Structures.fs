@@ -56,18 +56,21 @@ type Author = string * string
 
 type FileChange =
     { path : string
+      ext : string
       change : Change
       mode : string * string
       hash : Hash * Hash }
       
 type FileStat =
     { path : string
+      ext : string
       plus : int option
       minus : int option
       binary : bool }
       
 type FileData =
     { path : string
+      ext : string
       change : Change
       mode : string * string
       hash : Hash * Hash
@@ -123,6 +126,7 @@ type Commit =
                 | File x ->
                     files.[x.path] <-
                         { path = x.path
+                          ext = x.ext
                           change = x.change
                           mode = x.mode
                           hash = x.hash
