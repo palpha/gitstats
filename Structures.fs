@@ -32,7 +32,7 @@ let debug, info, warn, error =
                 let now = DateTime.Now
                 now.ToString ("yyyy-MM-dd HH:mm:ss"),
                 now.Millisecond.ToString ("000")
-            sprintf "[%A] %s.%s - %s" l time ms x
+            sprintf "[%A] [%i] - %s.%s - %s" l Threading.Thread.CurrentThread.ManagedThreadId time ms x
             |> synced.WriteLine
             
         | _ -> ()

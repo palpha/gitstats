@@ -226,7 +226,7 @@ let logParser =
         
 let lsParser =
     MailboxProcessor.Start (fun inbox ->
-        let rec loop ls bin = async {
+        let rec loop acc = async {
             let! msg, (replyChan : AsyncReplyChannel<string list> option) = inbox.Receive ()
             let reply x =
                 match replyChan with
@@ -235,26 +235,25 @@ let lsParser =
                 
             match msg with
             | Data x ->
-                let contLs, contBin =
+                sprintf "Ls parser received %A" x |> debug
+                let acc =
                     match x with
-                    | Regex @"^\d blob [a-f\d]+\s+(.+?)\s*$" [ path ] ->
-                        sprintf "  parsed ls %s" path |> debug
-                        path :: ls, bin
-                    | Regex @"^(?:\d+|-)\s+(?:\d+|-)\s+(.+?)\s*$" [ path ] ->
+                    | Regex @"^(\d+|-)\s+(?:\d+|-)\s+(.+?)\s*$" [ size; path ] ->
                         sprintf "  parsed diff-tree %s" path |> debug
-                        ls, path :: bin
+                        match size with
+                        | "-" -> "    is binary" |> debug; acc
+                        | _ -> path :: acc
                     | _ -> failwith "Could not parse ls."
                 
                 reply []
-                return! loop contLs contBin
+                return! loop acc
             | Finished ->
                 "Done parsing ls, commence blaming in parallel." |> info
-                let result = (ls |> Set.ofList) |> Set.difference (bin |> Set.ofList) |> Set.toList
-                reply result
+                reply acc
                 return ()
         }
         
-        loop [] [])
+        loop [])
         
 let createBlameParser path =
     MailboxProcessor.Start (fun inbox ->
@@ -355,58 +354,23 @@ let run wd cmd args (outputHandler:DataReceivedEventArgs -> unit) = async {
 
 [<EntryPoint>]
 let main args =
-    let parsedArgs =
-        let rec loop lst curr acc rest =
-            let pushCurr () = (fst curr, snd curr |> List.rev) :: acc
-            match lst with
-            | [] -> pushCurr () |> Map.ofList
-            | x::xs ->
-                match rest with
-                | true ->
-                    loop xs (fst curr, x :: snd curr) acc true
-                | _ ->
-                    match x with
-                    | Regex "^--(.+)" [ arg ] -> loop xs (arg, []) (pushCurr ()) false
-                    | Regex "^--$" [] -> loop xs ("--", []) (pushCurr ()) true
-                    | _ -> loop xs (fst curr, x :: snd curr) acc false
-        loop (args |> List.ofArray) ("", []) [] false
-
-    doTime <- parsedArgs.ContainsKey "time"
-
-    if parsedArgs.ContainsKey "debug" then
-        match parsedArgs.["debug"] with
-        | [] -> debugLvl := DebugLevel.Debug
-        | x::xs -> debugLvl := DebugLevel.parse x
+    Args.parse args
+    doTime <- Args.bool "time"
+    Args.singleOrFlag
+        "debug"
+        (fun x -> debugLvl := DebugLevel.parse x)
+        (fun () -> debugLvl := DebugLevel.Debug)
         
-    sprintf "Arguments: %A" parsedArgs |> debug
+    sprintf "Arguments: %A" Args.parsedArgs |> debug
 
-    let workingDir =
-        if parsedArgs.[""] <> List.empty
-        then parsedArgs.[""] |> List.head
-        else Environment.CurrentDirectory
-        
-    let gitCmd =
-        if parsedArgs.ContainsKey "git"
-        then parsedArgs.["git"] |> List.head
-        else "/usr/local/bin/git"
-        
+    let workingDir = Args.singleOrEmpty "" Environment.CurrentDirectory
+    let gitCmd = Args.singleOrEmpty "git" "/usr/local/bin/git"
     let run = run workingDir gitCmd
-        
-    if parsedArgs.ContainsKey "aliases" then
-        aliases <-
-            match parsedArgs.["aliases"] with
-            | [] | [_] -> failwith "Aliases must be pairs of e-mail addresses"
-            | pairs ->
-                let rec loop acc = function
-                    | [] | [_] -> List.rev acc
-                    | x :: y :: tl ->
-                        loop ((x, y) :: acc) tl
-                loop [] pairs |> Map.ofList
+    
+    Args.pairsOrEmpty "aliases" (fun x -> aliases <- x |> Map.ofList)
+    Args.listOrEmpty "skipext" (fun x -> skipExts <- x)
                 
-    if parsedArgs.ContainsKey "skipext" then
-        skipExts <- parsedArgs.["skipext"]
-        
-    let blameOnly = parsedArgs.ContainsKey "blame"
+    let blameOnly = Args.bool "blameonly"
 
     let analyzeLog = async {
         commitCollector.Error.Add (fun e ->
@@ -417,11 +381,7 @@ let main args =
             sprintf "Parser failed: %A" e |> error
             Environment.Exit 2)
             
-        let gitArgs =   
-            if parsedArgs.ContainsKey "--"
-            then String.Join (" ", parsedArgs.["--"])
-            else ""
-        
+        let gitArgs = Args.joinedList "--" " "
         let gitArgs = "log --all --raw --no-color --no-merges --numstat --ignore-space-change " + gitArgs
     
         do! run gitArgs collectLogOutput
@@ -434,11 +394,11 @@ let main args =
         match inclExt ext with
         | false -> return []
         | _ ->
-            let parser = createBlameParser path
+            sprintf "Analyzing blame for %s" path |> debug
+            use parser = createBlameParser path
             let handler = createBlameOutputHandler parser
             do! run (sprintf "blame --incremental -w -- %s" path) handler
-            let! result = parser.PostAndAsyncReply (fun ch -> Finished, Some ch)
-            return result
+            return! parser.PostAndAsyncReply (fun ch -> Finished, Some ch)
     }
         
     let analyzeTree = async {
@@ -446,7 +406,6 @@ let main args =
             sprintf "Ls parser failed: %A" e |> error
             Environment.Exit 3)
     
-        do! run "ls-tree -r HEAD" collectLsOutput
         do! run "diff-tree --numstat 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD" collectLsOutput
         let! result = lsParser.PostAndAsyncReply (fun ch -> Finished, Some ch)
         
