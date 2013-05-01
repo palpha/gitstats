@@ -1,5 +1,5 @@
 [<AutoOpen>]
-module GitStats.Structures
+module Structures
 
 open System
 open System.Diagnostics
@@ -86,7 +86,12 @@ type Part =
     | File of FileChange
     | Stat of FileStat
     | Blank
-    
+
+type BlamePart =
+    | Name of string
+    | Email of string
+    | Line of string
+
 type CollectInstruction =
     | Finished
     | Data of Part list
@@ -156,7 +161,8 @@ type Commit =
 
 type FileStats =
     { plus : int
-      minus : int }
+      minus : int
+      current : int }
 
 type ActivityStats =
     { commits : int
@@ -164,3 +170,10 @@ type ActivityStats =
       last : DateTime
       dates : Set<DateTime>
       files : IDictionary<string, FileStats> }
+
+type BlameStats =
+    { author : Author
+      path : string
+      ext : string
+      lines : int
+      chars : int }

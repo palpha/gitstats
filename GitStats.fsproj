@@ -42,6 +42,8 @@
     <Compile Include="AssemblyInfo.fs" />
     <Compile Include="Structures.fs" />
     <Compile Include="Testing.fsx" />
+    <Compile Include="Printers.fs" />
+    <Compile Include="Args.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\..\Microsoft F#\v4.0\Microsoft.FSharp.Targets" />

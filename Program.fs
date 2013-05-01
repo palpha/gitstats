@@ -3,7 +3,7 @@
 // Pad, right-click on the project node, choose 'Options --> Build --> General' and change the target
 // framework to .NET 4.0 or .NET 4.5.
 
-module GitStats.Main
+module Main
 
 open System
 open System.Diagnostics
@@ -56,13 +56,15 @@ let commitCollector =
     let activityStats = ConcurrentDictionary<_,_> ()
     let allExts = ref (set [] : Set<string>)
     MailboxProcessor.Start (fun inbox ->
-        let isoStr (x:DateTime) = x.ToString "yyyy-MM-dd"
         let rec loop () = async {
-            let! msg, (replyChan : AsyncReplyChannel<unit> option) = inbox.Receive ()
-            let reply () =
+            let! msg, (replyChan : AsyncReplyChannel<IDictionary<_,_>> option) = inbox.Receive ()
+            
+            let reply =
                 match replyChan with
-                | Some ch -> ch.Reply ()
-                | _ -> ()
+                | Some ch -> (function
+                    | Some x -> x :> IDictionary<_,_>
+                    | _ -> failwith "Invalid response.") >> ch.Reply
+                | _ -> (fun x -> ())
 
             match msg with
             | CollectInstruction.Data x ->
@@ -75,7 +77,8 @@ let commitCollector =
                         |> Seq.map (fun (k, g) ->
                             k,
                             { plus = g |> Seq.choose (fun x -> x.plus) |> Seq.sum
-                              minus = g |> Seq.choose (fun x -> x.minus) |> Seq.sum })
+                              minus = g |> Seq.choose (fun x -> x.minus) |> Seq.sum
+                              current = 0 })
                         |> dict
                         
                     Interlocked.Exchange (allExts, files.Keys |> set |> Set.union !allExts) |> ignore
@@ -98,68 +101,23 @@ let commitCollector =
                                 |> Seq.append files.Keys
                                 |> Seq.map (fun k ->
                                     let get (x:IDictionary<_,_>) =
-                                        match x.TryGetValue k with true, x -> x | _ -> { plus = 0; minus = 0 }
+                                        match x.TryGetValue k with true, x -> x | _ -> { plus = 0; minus = 0; current = 0 }
                                     let xf = get x.files
                                     let nf = get files
-                                    k, { plus = xf.plus + nf.plus; minus = xf.minus + nf.minus })
+                                    k, { plus = xf.plus + nf.plus; minus = xf.minus + nf.minus; current = 0 })
                                 |> dict })))
                     |> ignore
                     sprintf "Collected %s" commit.hash |> info
-                    reply ())
+                    reply None)
                 return! loop () // wait for next
             | CollectInstruction.Finished ->
                 "Done collecting." |> info
-                let topContribs = Dictionary<string, int * string * string> ()
-                
-                activityStats
-                |> Seq.iter (fun x ->
-                    let (name, email), stats = x.Key, x.Value
-                    let heading = sprintf "%s <%s>" name email
-                    printfn "%s\n%s" heading <| String.replicate heading.Length "="
-                    
-                    printfn "Commits: %i" stats.commits
-                    printfn "Active days: %i" stats.dates.Count
-                    printfn "Commits/active day: %f" (float stats.commits / float stats.dates.Count)
-                    printfn "First commit: %s" <| isoStr stats.first
-                    printfn "Last commit: %s" <| isoStr stats.last
-                    
-                    let daysInvolved = (stats.last - stats.first).TotalDays
-                    printfn "Commits/day: %f" (float stats.commits / daysInvolved)
-                    printfn ""
-                    
-                    stats.files
-                    |> Seq.iter (fun x ->
-                        let ext, stats = x.Key, x.Value
-
-                        printfn ".%s" ext
-                        printfn "%s" <| String.replicate (ext.Length + 1) "-"
-                        printfn "Additions: %i" stats.plus
-                        printfn "Removals: %i" stats.minus
-                        printfn ""
-                        
-//                        match contrib with
-//                        | 0 -> ()
-//                        | _ ->
-//                            let f () = topContribs.[ext] <- (contrib, name, email)
-//                            match topContribs.TryGetValue ext with
-//                            | false, _ -> f ()
-//                            | _, (x, _, _) when x < contrib -> f ()
-//                            | _ -> ())
-                        ))
-                
-//                let heading = "File types, current contribution"
-//                printfn "%s\n%s" heading <| String.replicate heading.Length "="
-//                topContribs
-//                |> Seq.iter (fun x ->
-//                    let ext, (contrib, name, email) = x.Key, x.Value
-//                    printfn ".%s: %s <%s>, %i lines" ext name email contrib)
-                
-                reply ()
+                reply <| Some activityStats
                 return () // break loop
         }
         loop ())
     
-let parse data =
+let parseLog data =
     time "parse" (fun () ->
         match data with
         | Regex "^commit (.+)$" [ hash ] ->
@@ -191,12 +149,12 @@ let parse data =
         | Regex "^ {4}(.+)$" [ msg ] ->
             sprintf "  parsed message %s" msg |> debug
             Message msg
-        | Regex "^$" [] -> Blank
+        | Regex "^$" [] -> Part.Blank
         | Regex @"^:(\d+) (\d+) ([\da-f\.]+) ([\da-f\.]+) ([AMD])\s+(.+?)\s*$" [ modeB; modeA; hashB; hashA; change; path ] ->
             sprintf "  parsed file %s" path |> debug
             let ext = getExt path
             match inclExt ext with
-            | false -> Blank
+            | false -> Part.Blank
             | _ -> File { path = path.Trim (); ext = ext; change = Change.parse change; mode = modeB, modeA; hash = hashB, hashA }
         | Regex @"^(\d+)\s+(\d+)\s+(.+?)\s*$" [ plus; minus; path ] ->
             sprintf "  parsed stat %s" path |> debug
@@ -206,7 +164,7 @@ let parse data =
                 
             let ext = getExt path
             match inclExt ext with
-            | false -> Blank
+            | false -> Part.Blank
             | _ ->
                 let plus = parseNum plus
                 let minus = parseNum minus
@@ -220,16 +178,19 @@ let parse data =
                 Stat { path = path.Trim (); ext = ext; binary = binary; plus = plus; minus = minus }
         | _ ->
             sprintf "  did not parse %s" data |> debug
-            Blank)
+            Part.Blank)
 
 let logParser =
     MailboxProcessor.Start (fun inbox ->
         let rec loop acc = async {
-            let! msg, (replyChan : AsyncReplyChannel<unit> option) = inbox.Receive ()
-            let reply () =
+            let! msg, (replyChan : AsyncReplyChannel<IDictionary<_,_>> option) = inbox.Receive ()
+
+            let reply =
                 match replyChan with
-                | Some ch -> ch.Reply ()
-                | _ -> ()
+                | Some ch -> (function
+                    | Some x -> x :> IDictionary<_,_>
+                    | _ -> failwith "Invalid response.") >> ch.Reply
+                | _ -> (fun x -> ())
             
             let postToCollector =
                 List.rev
@@ -240,24 +201,24 @@ let logParser =
             match msg with
             | Data x ->
                 sprintf "Log parser received %A" x |> debug
-                let part = parse x
+                let part = parseLog x
                 let cont =
                     match part with
                     | Commit hash ->
                         match acc with
-                        | [] -> part :: acc
-                        | _ ->
-                            postToCollector acc
-                            part :: []
-                    | Blank -> acc
+                        | [] -> ()
+                        | _ -> postToCollector acc
+                        
+                        part :: []
+                    | Part.Blank -> acc
                     | _ -> part :: acc
-                reply ()
+                reply None
                 return! loop cont
             | Finished ->
                 "Done parsing log." |> info
                 postToCollector acc
                 commitCollector.PostAndReply (fun ch -> CollectInstruction.Finished, Some ch)
-                reply ()
+                |> Some |> reply
                 return ()
         }
         
@@ -265,43 +226,102 @@ let logParser =
         
 let lsParser =
     MailboxProcessor.Start (fun inbox ->
-        let rec loop acc = async {
-            let! msg, (replyChan : AsyncReplyChannel<unit> option) = inbox.Receive ()
-            let reply () =
+        let rec loop ls bin = async {
+            let! msg, (replyChan : AsyncReplyChannel<string list> option) = inbox.Receive ()
+            let reply x =
                 match replyChan with
-                | Some ch -> ch.Reply ()
+                | Some ch -> ch.Reply x
                 | _ -> ()
                 
             match msg with
             | Data x ->
-                let cont =
+                let contLs, contBin =
                     match x with
-                    | Regex @"\d blob [a-f\d]+\s+(.+?)\s*$" [ path ] ->
+                    | Regex @"^\d blob [a-f\d]+\s+(.+?)\s*$" [ path ] ->
                         sprintf "  parsed ls %s" path |> debug
-                        path :: acc
+                        path :: ls, bin
+                    | Regex @"^(?:\d+|-)\s+(?:\d+|-)\s+(.+?)\s*$" [ path ] ->
+                        sprintf "  parsed diff-tree %s" path |> debug
+                        ls, path :: bin
                     | _ -> failwith "Could not parse ls."
                 
-                reply ()
-                return! loop acc
+                reply []
+                return! loop contLs contBin
             | Finished ->
                 "Done parsing ls, commence blaming in parallel." |> info
-                reply ()
+                let result = (ls |> Set.ofList) |> Set.difference (bin |> Set.ofList) |> Set.toList
+                reply result
                 return ()
         }
         
-        loop [])
+        loop [] [])
+        
+let createBlameParser path =
+    MailboxProcessor.Start (fun inbox ->
+        let buildLine parts =
+            let name = ref String.Empty
+            let email = ref String.Empty
+            let lines = ref 0
+            let chars = ref 0
+            let rec loop = function
+                | [] -> ()
+                | x::xs ->
+                    match x with
+                    | Name x -> name := x
+                    | Email x -> email := x
+                    | Line x ->
+                        Interlocked.Increment lines |> ignore
+                        Interlocked.Add (chars, x.Length) |> ignore
+                    loop xs
+            loop parts
+            
+            { author = !name, !email; path = path; ext = getExt path; lines = !lines; chars = !chars } : BlameStats
+    
+        let rec loop parts lines = async {
+            let! msg, (replyChan : AsyncReplyChannel<BlameStats list> option) = inbox.Receive ()
+            let reply x = match replyChan with Some ch -> ch.Reply x | _ -> ()
+            
+            match msg with
+            | Data x ->
+                let parts, lines =
+                    match x with
+                    | Regex @"^author (.+?)\s*$" [ name ] ->
+                        let name = Name name
+                        
+                        let lines =
+                            match parts with
+                            | [] -> lines
+                            | _ -> buildLine parts :: lines
+                            
+                        name :: [], lines
+                        
+                    | Regex @"^author-mail (.+?)\s*$" [ email ] -> Email email :: parts, lines
+                    | Regex @"^\t(.+?)\s*$" [ line ] -> Line line :: parts, lines
+                    | _ -> parts, lines
+                
+                reply []
+                return! loop parts lines
+            | Finished ->
+                sprintf "Done parsing blame for %s" path |> debug
+                
+                reply <| (buildLine parts) :: lines
+                return ()
+        }
+        
+        loop [] [])
 
 let buildOutputHandler f =
     fun (x:DataReceivedEventArgs) ->
         time "eventing" (fun () ->
             match x.Data with
             | null -> ()
-            | _ -> f (x.Data))
+            | _ -> f (Data x.Data, None))
 
-let collectLogOutput = buildOutputHandler (fun x -> logParser.Post (Data x, None))
-let collectLsOutput = buildOutputHandler (fun x -> lsParser.Post (Data x, None))
+let collectLogOutput = buildOutputHandler logParser.Post
+let collectLsOutput = buildOutputHandler lsParser.Post
+let createBlameOutputHandler (parser:MailboxProcessor<_ * _>) = buildOutputHandler parser.Post
 
-let run cmd args wd (outputHandler:DataReceivedEventArgs -> unit) = async {
+let run wd cmd args (outputHandler:DataReceivedEventArgs -> unit) = async {
     sprintf "%s %s" cmd args |> debug
 
     let psi = ProcessStartInfo ()
@@ -365,6 +385,13 @@ let main args =
         then parsedArgs.[""] |> List.head
         else Environment.CurrentDirectory
         
+    let gitCmd =
+        if parsedArgs.ContainsKey "git"
+        then parsedArgs.["git"] |> List.head
+        else "/usr/local/bin/git"
+        
+    let run = run workingDir gitCmd
+        
     if parsedArgs.ContainsKey "aliases" then
         aliases <-
             match parsedArgs.["aliases"] with
@@ -395,24 +422,65 @@ let main args =
             then String.Join (" ", parsedArgs.["--"])
             else ""
         
-        let gitArgs = "log --all --raw --no-color --no-merges --numstat " + gitArgs
+        let gitArgs = "log --all --raw --no-color --no-merges --numstat --ignore-space-change " + gitArgs
     
-        do! run "/usr/local/bin/git" gitArgs workingDir collectLogOutput
-        logParser.PostAndReply (fun ch -> Finished, Some ch)
+        do! run gitArgs collectLogOutput
+        
+        return logParser.PostAndReply (fun ch -> Finished, Some ch)
+    }
+    
+    let analyzeBlame path = async {
+        let ext = getExt path
+        match inclExt ext with
+        | false -> return []
+        | _ ->
+            let parser = createBlameParser path
+            let handler = createBlameOutputHandler parser
+            do! run (sprintf "blame --incremental -w -- %s" path) handler
+            let! result = parser.PostAndAsyncReply (fun ch -> Finished, Some ch)
+            return result
     }
         
-    let analyzeBlame = async {
-        do! run "/usr/local/bin/git" "ls-tree -r HEAD" workingDir collectLsOutput
-        lsParser.PostAndReply (fun ch -> Finished, Some ch)
+    let analyzeTree = async {
+        lsParser.Error.Add (fun e ->
+            sprintf "Ls parser failed: %A" e |> error
+            Environment.Exit 3)
+    
+        do! run "ls-tree -r HEAD" collectLsOutput
+        do! run "diff-tree --numstat 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD" collectLsOutput
+        let! result = lsParser.PostAndAsyncReply (fun ch -> Finished, Some ch)
+        
+        let lines =
+            result
+            |> List.map analyzeBlame
+            |> Async.Parallel
+            |> Async.RunSynchronously
+            |> List.concat
+            
+        return lines
     }
     
     let f () =
+        let activity : IDictionary<_,_> ref = ref <| dict []
+        let analyzeLog = async {
+            let result = analyzeLog |> Async.RunSynchronously
+            activity := result
+        }
+        
+        let lines : BlameStats list ref = ref []
+        let analyzeTree = async {
+            let result = analyzeTree |> Async.RunSynchronously
+            lines := result
+        }
+    
         if not blameOnly
-        then [analyzeLog; analyzeBlame]
-        else [analyzeBlame]
+        then [analyzeLog; analyzeTree]
+        else [analyzeTree]
         |> Async.Parallel
         |> Async.RunSynchronously
         |> ignore
+        
+        Printers.printMarkdown !activity
 
     match doTime with
     | false -> f ()
