@@ -171,6 +171,10 @@ type ActivityStats =
       dates : Set<DateTime>
       files : IDictionary<string, FileStats> }
 
+type BlameLine =
+    { author : Author
+      chars : int }
+
 type BlameStats =
     { author : Author
       path : string

@@ -18,19 +18,22 @@ let mutable skipExts = List.empty
 let mutable inclExts = List.empty
 
 let inclExt =
-    let inclSet = inclExts |> set
-    let skipSet = skipExts |> set
+    let inclSet = lazy (inclExts |> set)
+    let skipSet = lazy (skipExts |> set)
     let cache = ConcurrentDictionary<_,_> ()
     fun ext ->
         match cache.TryGetValue ext with
         | true, x -> x
         | _ ->
             let result =
-                match skipSet.Contains ext, inclSet.Count with
+                match skipSet.Force().Contains ext, inclSet.Force().Count with
                 | true, _ -> false
                 | false, 0 -> true
-                | _, x when x > 0 && inclSet.Contains ext -> true
+                | _, x when x > 0 && inclSet.Force().Contains ext -> true
                 | _ -> false
+                
+            if result then printfn "Including %s" ext
+
             cache.TryAdd (ext, result) |> ignore
             result
 
@@ -73,12 +76,14 @@ let commitCollector =
                     
                     let files =
                         commit.files
+                        |> Seq.where (fun x -> not x.binary)
                         |> Seq.groupBy (fun x -> getExt x.path)
                         |> Seq.map (fun (k, g) ->
                             k,
                             { plus = g |> Seq.choose (fun x -> x.plus) |> Seq.sum
                               minus = g |> Seq.choose (fun x -> x.minus) |> Seq.sum
                               current = 0 })
+                        |> Seq.where (fun (x, d) -> d.plus > 0 || d.minus > 0)
                         |> dict
                         
                     Interlocked.Exchange (allExts, files.Keys |> set |> Set.union !allExts) |> ignore
@@ -156,7 +161,7 @@ let parseLog data =
             match inclExt ext with
             | false -> Part.Blank
             | _ -> File { path = path.Trim (); ext = ext; change = Change.parse change; mode = modeB, modeA; hash = hashB, hashA }
-        | Regex @"^(\d+)\s+(\d+)\s+(.+?)\s*$" [ plus; minus; path ] ->
+        | Regex @"^(\d+|-)\s+(\d+|-)\s+(.+?)\s*$" [ plus; minus; path ] ->
             sprintf "  parsed stat %s" path |> debug
             let parseNum = function
                 | "-" -> None
@@ -243,6 +248,7 @@ let lsParser =
                         match size with
                         | "-" -> "    is binary" |> debug; acc
                         | _ -> path :: acc
+                    | "" -> acc
                     | _ -> failwith "Could not parse ls."
                 
                 reply []
@@ -260,7 +266,6 @@ let createBlameParser path =
         let buildLine parts =
             let name = ref String.Empty
             let email = ref String.Empty
-            let lines = ref 0
             let chars = ref 0
             let rec loop = function
                 | [] -> ()
@@ -268,13 +273,13 @@ let createBlameParser path =
                     match x with
                     | Name x -> name := x
                     | Email x -> email := x
-                    | Line x ->
-                        Interlocked.Increment lines |> ignore
-                        Interlocked.Add (chars, x.Length) |> ignore
+                    | Line x -> chars := String.length <| x.Trim ()
                     loop xs
             loop parts
             
-            { author = !name, !email; path = path; ext = getExt path; lines = !lines; chars = !chars } : BlameStats
+            match !chars with
+            | 0 -> None
+            | _ -> Some ({ author = !name, !email; chars = !chars } : BlameLine)
     
         let rec loop parts lines = async {
             let! msg, (replyChan : AsyncReplyChannel<BlameStats list> option) = inbox.Receive ()
@@ -294,7 +299,7 @@ let createBlameParser path =
                             
                         name :: [], lines
                         
-                    | Regex @"^author-mail (.+?)\s*$" [ email ] -> Email email :: parts, lines
+                    | Regex @"^author-mail <(.+?)>\s*$" [ email ] -> Email email :: parts, lines
                     | Regex @"^\t(.+?)\s*$" [ line ] -> Line line :: parts, lines
                     | _ -> parts, lines
                 
@@ -302,8 +307,19 @@ let createBlameParser path =
                 return! loop parts lines
             | Finished ->
                 sprintf "Done parsing blame for %s" path |> debug
+                let result =
+                    (buildLine parts) :: lines
+                    |> Seq.choose id
+                    |> Seq.groupBy (fun x -> x.author)
+                    |> Seq.map (fun (author, xs) ->
+                        { author = author
+                          path = path
+                          ext = getExt path
+                          lines = xs |> Seq.length
+                          chars = xs |> Seq.sumBy (fun x -> x.chars) })
+                    |> Seq.toList
                 
-                reply <| (buildLine parts) :: lines
+                reply result
                 return ()
         }
         
@@ -317,8 +333,6 @@ let buildOutputHandler f =
             | _ -> f (Data x.Data, None))
 
 let collectLogOutput = buildOutputHandler logParser.Post
-let collectLsOutput = buildOutputHandler lsParser.Post
-let createBlameOutputHandler (parser:MailboxProcessor<_ * _>) = buildOutputHandler parser.Post
 
 let run wd cmd args (outputHandler:DataReceivedEventArgs -> unit) = async {
     sprintf "%s %s" cmd args |> debug
@@ -352,6 +366,34 @@ let run wd cmd args (outputHandler:DataReceivedEventArgs -> unit) = async {
         Environment.Exit x
 }
 
+let runBuf wd cmd args =
+    sprintf "%s %s" cmd args |> debug
+
+    let psi = ProcessStartInfo ()
+    psi.FileName <- cmd
+    psi.Arguments <- args
+    psi.WorkingDirectory <- wd
+    psi.CreateNoWindow <- true
+    psi.RedirectStandardOutput <- true
+    psi.RedirectStandardError <- true
+    psi.UseShellExecute <- false
+    
+    use proc = new Process ()
+    proc.StartInfo <- psi
+    
+    time "git" (fun () ->
+        proc.Start () |> ignore
+        let output = proc.StandardOutput.ReadToEnd ()
+        proc.WaitForExit ()
+    
+        match proc.ExitCode with
+        | 0 ->
+            sprintf "Done running %s %s." cmd args |> info
+            output
+        | x ->
+            proc.StandardError.ReadToEnd () |> error
+            Environment.Exit x; String.Empty)
+
 [<EntryPoint>]
 let main args =
     Args.parse args
@@ -367,8 +409,9 @@ let main args =
     let gitCmd = Args.singleOrEmpty "git" "/usr/local/bin/git"
     let run = run workingDir gitCmd
     
-    Args.pairsOrEmpty "aliases" (fun x -> aliases <- x |> Map.ofList)
-    Args.listOrEmpty "skipext" (fun x -> skipExts <- x)
+    Args.pairsOrEmpty "aliases" (fun x -> aliases <- Map.ofList x )
+    Args.listOrEmpty "exclude" (fun x -> skipExts <- x)
+    Args.listOrEmpty "include" (fun x -> inclExts <- x)
                 
     let blameOnly = Args.bool "blameonly"
 
@@ -389,31 +432,51 @@ let main args =
         return logParser.PostAndReply (fun ch -> Finished, Some ch)
     }
     
+    let toParser (p:MailboxProcessor<_ * _>) (x:string) =
+        x.Split ([|"\n".[0]|]) |> Array.iter (fun x -> p.Post (Data x, None))
+    
     let analyzeBlame path = async {
         let ext = getExt path
         match inclExt ext with
         | false -> return []
         | _ ->
             sprintf "Analyzing blame for %s" path |> debug
-            use parser = createBlameParser path
-            let handler = createBlameOutputHandler parser
-            do! run (sprintf "blame --incremental -w -- %s" path) handler
+            let output = runBuf workingDir gitCmd (sprintf "blame --line-porcelain -w -- %s" ("\"" + path + "\""))
+            let parser = createBlameParser path
+            output |> toParser parser
             return! parser.PostAndAsyncReply (fun ch -> Finished, Some ch)
     }
         
     let analyzeTree = async {
-        lsParser.Error.Add (fun e ->
-            sprintf "Ls parser failed: %A" e |> error
-            Environment.Exit 3)
+        let parse x =
+            match x with
+            | Regex @"^(\d+|-)\s+(?:\d+|-)\s+(.+?)\s*$" [ size; path ] ->
+                sprintf "  parsed diff-tree %s" path |> debug
+                match size with
+                | "-" -> "    is binary" |> debug; None
+                | _ ->
+                    match IO.Directory.Exists <| IO.Path.Combine (workingDir, path) with
+                    | false -> Some path
+                    | _ -> "    is directory" |> debug; None
+            | "" -> None
+            | _ -> failwith "Could not parse ls."
+
     
-        do! run "diff-tree --numstat 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD" collectLsOutput
-        let! result = lsParser.PostAndAsyncReply (fun ch -> Finished, Some ch)
+        let output = runBuf workingDir gitCmd "diff-tree --numstat 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD"
         
         let lines =
-            result
-            |> List.map analyzeBlame
+            output.Split ([|"\n".[0]|])
+            |> Array.map (fun x -> async {
+                match parse x with
+                | Some x ->
+                    let! lines = analyzeBlame x
+                    return Some lines
+                | _ -> return None
+            })
             |> Async.Parallel
             |> Async.RunSynchronously
+            |> Array.toList
+            |> List.choose id
             |> List.concat
             
         return lines
@@ -439,7 +502,7 @@ let main args =
         |> Async.RunSynchronously
         |> ignore
         
-        Printers.printMarkdown !activity
+        Printers.printMarkdown !activity !lines
 
     match doTime with
     | false -> f ()
