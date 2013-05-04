@@ -11,20 +11,28 @@ let printMarkdown (logStats:IDictionary<_,_>) (blameStats:BlameStats list) =
         h "=", h "-"
     
     let contribByExt, topContribByExt, topContribByAuthor =
-        let byExt = blameStats |> Seq.groupBy (fun x -> x.ext)
+        let byExt =
+            blameStats
+            |> Seq.groupBy (fun x -> x.ext)
+            |> Seq.map (fun (ext, xs) ->
+                ext,
+                xs
+                |> Seq.groupBy (fun x -> x.author)
+                |> Seq.map (fun (author, xs) ->
+                    author,
+                    { author = author
+                      path = null
+                      ext = ext
+                      lines = xs |> Seq.sumBy (fun x -> x.lines)
+                      chars = xs |> Seq.sumBy (fun x -> x.chars) })
+                |> dict)
+            |> dict
 
         let top =
             byExt
-            |> Seq.map (fun (ext, xs) ->
-                let top = xs |> Seq.maxBy (fun x -> x.chars)
-                ext, top)
+            |> Seq.map (fun x -> x.Key, x.Value |> Seq.maxBy (fun x -> x.Value.chars))
             |> dict
-            
-        let byExt =
-            byExt
-            |> Seq.map (fun (ext, xs) -> ext, xs |> Seq.map (fun x -> x.author, x) |> dict)
-            |> dict
-            
+                        
         let byAuthor =
             blameStats
             |> Seq.groupBy (fun x -> x.author)
@@ -72,8 +80,8 @@ let printMarkdown (logStats:IDictionary<_,_>) (blameStats:BlameStats list) =
     topContribByExt
     |> Seq.iter (fun x ->
         sprintf ".%s" x.Key |> h2
-        let name, email = x.Value.author
-        printfn "%s <%s>: %i lines, %i chars" name email x.Value.lines x.Value.chars
+        let name, email = x.Value.Key
+        printfn "%s <%s>: %i lines, %i chars" name email x.Value.Value.lines x.Value.Value.chars
         printfn "")
         
     h2 "Overall"

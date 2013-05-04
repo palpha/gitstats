@@ -32,8 +32,6 @@ let inclExt =
                 | _, x when x > 0 && inclSet.Force().Contains ext -> true
                 | _ -> false
                 
-            if result then printfn "Including %s" ext
-
             cache.TryAdd (ext, result) |> ignore
             result
 
