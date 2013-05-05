@@ -71,21 +71,24 @@ let printMarkdown (logStats:IDictionary<_,_>) (blameStats:BlameStats list) =
             sprintf ".%s" ext |> h2
             printfn "Additions: %i" stats.plus
             printfn "Removals: %i" stats.minus
-            printfn "Current lines: %i" contribByExt.[ext].[author].lines
-            printfn "Current chars: %i"  contribByExt.[ext].[author].chars
+            if contribByExt.ContainsKey ext && contribByExt.[ext].ContainsKey author then
+                printfn "Current lines: %i" contribByExt.[ext].[author].lines
+                printfn "Current chars: %i"  contribByExt.[ext].[author].chars
+                
             printfn ""))
 
-    "Top contributors in HEAD" |> h1
-    printfn ""
-    topContribByExt
-    |> Seq.iter (fun x ->
-        sprintf ".%s" x.Key |> h2
-        let name, email = x.Value.Key
-        printfn "%s <%s>: %i lines, %i chars" name email x.Value.Value.lines x.Value.Value.chars
-        printfn "")
-        
-    h2 "Overall"
-    topContribByAuthor
-    |> Seq.iter (fun x ->
-        let name, email = x.author
-        printfn "%s <%s>: %i lines, %i chars" name email x.lines x.chars)
+    if topContribByExt.Count > 0 then
+        "Current top contributors" |> h1
+        printfn ""
+        topContribByExt
+        |> Seq.iter (fun x ->
+            sprintf ".%s" x.Key |> h2
+            let name, email = x.Value.Key
+            printfn "%s <%s>: %i lines, %i chars" name email x.Value.Value.lines x.Value.Value.chars
+            printfn "")
+            
+        h2 "Overall"
+        topContribByAuthor
+        |> Seq.iter (fun x ->
+            let name, email = x.author
+            printfn "%s <%s>: %i lines, %i chars" name email x.lines x.chars)

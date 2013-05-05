@@ -171,8 +171,9 @@ type ActivityStats =
       dates : Set<DateTime>
       files : IDictionary<string, FileStats> }
 
-type BlameLine =
+type BlameLines =
     { author : Author
+      lines : int
       chars : int }
 
 type BlameStats =

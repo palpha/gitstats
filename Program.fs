@@ -11,6 +11,7 @@ open System.Collections.Generic
 open System.Collections.Concurrent
 open Microsoft.FSharp
 open System.Threading
+open System.Linq
 
 let mutable doTime = false
 let mutable aliases = Map.empty
@@ -52,7 +53,7 @@ let getExt path =
     if m.Success
     then m.Groups.[1].Value
     else String.Empty
-            
+
 let commitCollector =
     let activityStats = ConcurrentDictionary<_,_> ()
     let allExts = ref (set [] : Set<string>)
@@ -235,7 +236,7 @@ let lsParser =
                 match replyChan with
                 | Some ch -> ch.Reply x
                 | _ -> ()
-                
+               
             match msg with
             | Data x ->
                 sprintf "Ls parser received %A" x |> debug
@@ -248,7 +249,7 @@ let lsParser =
                         | _ -> path :: acc
                     | "" -> acc
                     | _ -> failwith "Could not parse ls."
-                
+                    
                 reply []
                 return! loop acc
             | Finished ->
@@ -265,19 +266,24 @@ let createBlameParser path =
             let name = ref String.Empty
             let email = ref String.Empty
             let chars = ref 0
+            let lines = ref 0
             let rec loop = function
                 | [] -> ()
                 | x::xs ->
                     match x with
                     | Name x -> name := x
                     | Email x -> email := x
-                    | Line x -> chars := String.length <| x.Trim ()
+                    | Line x ->
+                        let len = String.length <| x.Trim ()
+                        if len > 0 then
+                            chars := !chars + len
+                            lines := !lines + 1
                     loop xs
             loop parts
             
             match !chars with
             | 0 -> None
-            | _ -> Some ({ author = !name, !email; chars = !chars } : BlameLine)
+            | _ -> Some ({ author = !name, !email; lines = !lines; chars = !chars } : BlameLines)
     
         let rec loop parts lines = async {
             let! msg, (replyChan : AsyncReplyChannel<BlameStats list> option) = inbox.Receive ()
@@ -313,7 +319,7 @@ let createBlameParser path =
                         { author = author
                           path = path
                           ext = getExt path
-                          lines = xs |> Seq.length
+                          lines = xs |> Seq.sumBy (fun x -> x.lines)
                           chars = xs |> Seq.sumBy (fun x -> x.chars) })
                     |> Seq.toList
                 
@@ -332,7 +338,7 @@ let buildOutputHandler f =
 
 let collectLogOutput = buildOutputHandler logParser.Post
 
-let run wd cmd args (outputHandler:DataReceivedEventArgs -> unit) = async {
+let run wd cmd args (outputHandler:DataReceivedEventArgs -> unit) =
     sprintf "%s %s" cmd args |> debug
 
     let psi = ProcessStartInfo ()
@@ -362,7 +368,6 @@ let run wd cmd args (outputHandler:DataReceivedEventArgs -> unit) = async {
     | x ->
         proc.StandardError.ReadToEnd () |> error
         Environment.Exit x
-}
 
 let runBuf wd cmd args =
     sprintf "%s %s" cmd args |> debug
@@ -379,7 +384,7 @@ let runBuf wd cmd args =
     use proc = new Process ()
     proc.StartInfo <- psi
     
-    time "git" (fun () ->
+    time "git buf" (fun () ->
         proc.Start () |> ignore
         let output = proc.StandardOutput.ReadToEnd ()
         proc.WaitForExit ()
@@ -410,10 +415,12 @@ let main args =
     Args.pairsOrEmpty "aliases" (fun x -> aliases <- Map.ofList x )
     Args.listOrEmpty "exclude" (fun x -> skipExts <- x)
     Args.listOrEmpty "include" (fun x -> inclExts <- x)
+    let parallelism = int <| Args.singleOrEmpty "parallel" "-1"
                 
+    let logOnly = Args.bool "logonly"
     let blameOnly = Args.bool "blameonly"
 
-    let analyzeLog = async {
+    let analyzeLog () =
         commitCollector.Error.Add (fun e ->
             sprintf "Commit collector failed: %A" e |> error
             Environment.Exit 1)
@@ -425,27 +432,25 @@ let main args =
         let gitArgs = Args.joinedList "--" " "
         let gitArgs = "log --all --raw --no-color --no-merges --numstat --ignore-space-change " + gitArgs
     
-        do! run gitArgs collectLogOutput
+        run gitArgs collectLogOutput
         
-        return logParser.PostAndReply (fun ch -> Finished, Some ch)
-    }
+        logParser.PostAndReply (fun ch -> Finished, Some ch)
     
     let toParser (p:MailboxProcessor<_ * _>) (x:string) =
         x.Split ([|"\n".[0]|]) |> Array.iter (fun x -> p.Post (Data x, None))
     
-    let analyzeBlame path = async {
+    let analyzeBlame path =
         let ext = getExt path
         match inclExt ext with
-        | false -> return []
+        | false -> []
         | _ ->
             sprintf "Analyzing blame for %s" path |> debug
-            let output = runBuf workingDir gitCmd (sprintf "blame --line-porcelain -w -- %s" ("\"" + path + "\""))
+            let output = runBuf workingDir gitCmd (sprintf "blame --porcelain -w -- %s" ("\"" + path + "\""))
             let parser = createBlameParser path
             output |> toParser parser
-            return! parser.PostAndAsyncReply (fun ch -> Finished, Some ch)
-    }
+            parser.PostAndReply (fun ch -> Finished, Some ch)            
         
-    let analyzeTree = async {
+    let analyzeTree () =
         let parse x =
             match x with
             | Regex @"^(\d+|-)\s+(?:\d+|-)\s+(.+?)\s*$" [ size; path ] ->
@@ -463,44 +468,42 @@ let main args =
         let output = runBuf workingDir gitCmd "diff-tree --numstat 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD"
         
         let lines =
-            output.Split ([|"\n".[0]|])
-            |> Array.map (fun x -> async {
-                match parse x with
-                | Some x ->
-                    let! lines = analyzeBlame x
-                    return Some lines
-                | _ -> return None
-            })
-            |> Async.Parallel
-            |> Async.RunSynchronously
-            |> Array.toList
-            |> List.choose id
-            |> List.concat
+            let i = ref 0
+            let parallelize =
+                match parallelism with
+                | -1 -> Environment.ProcessorCount / 2
+                | x -> x
             
-        return lines
-    }
+            time "blame" (fun () ->
+                let paths =
+                    output.Split ([|"\n".[0]|])
+                    |> Seq.choose parse
+
+                paths
+                    .AsParallel()
+                    .WithDegreeOfParallelism(parallelize)
+                    .WithExecutionMode(ParallelExecutionMode.ForceParallelism)
+                    .Select(analyzeBlame)
+                |> Seq.concat
+                |> Seq.toList)
+            
+        lines
     
     let f () =
         let activity : IDictionary<_,_> ref = ref <| dict []
-        let analyzeLog = async {
-            let result = analyzeLog |> Async.RunSynchronously
-            activity := result
-        }
+        let analyzeLog () = activity := analyzeLog ()
         
         let lines : BlameStats list ref = ref []
-        let analyzeTree = async {
-            let result = analyzeTree |> Async.RunSynchronously
-            lines := result
-        }
+        let analyzeTree () = lines := analyzeTree ()
     
-        if not blameOnly
-        then [analyzeLog; analyzeTree]
-        else [analyzeTree]
-        |> Async.Parallel
-        |> Async.RunSynchronously
+        match logOnly, blameOnly with
+        | true, false -> [analyzeLog]
+        | false, true -> [analyzeTree]
+        | _ -> [analyzeLog; analyzeTree]
+        |> Seq.iter (fun x -> x ())
         |> ignore
         
-        Printers.printMarkdown !activity !lines
+        time "print" (fun () -> Printers.printMarkdown !activity !lines)
 
     match doTime with
     | false -> f ()
