@@ -34,7 +34,7 @@ let singleOrEmpty x defaultValue =
         then parsedArgs.[x] |> List.head
         else defaultValue
     else defaultValue
-    
+
 let pairsOrEmpty x ifp =
     if parsedArgs.ContainsKey x then
         match parsedArgs.[x] with
@@ -45,11 +45,11 @@ let pairsOrEmpty x ifp =
                 | x :: y :: tl ->
                     loop ((x, y) :: acc) tl
             loop [] pairs |> ifp
-    
+
 let listOrEmpty x ifl =
     if parsedArgs.ContainsKey x
     then ifl parsedArgs.[x]
-    
+
 let joinedList x s =
     if parsedArgs.ContainsKey x
     then String.Join (s, parsedArgs.[x])

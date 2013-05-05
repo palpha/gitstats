@@ -34,7 +34,7 @@ let aggregate blameStats =
             |> List.rev
             |> Seq.take (min 3 x.Value.Count))
         |> dict
-                    
+
     let byAuthor =
         blameStats
         |> Seq.groupBy (fun x -> x.author)
@@ -47,7 +47,7 @@ let aggregate blameStats =
         |> Seq.sortBy (fun x -> x.chars)
         |> Seq.toList
         |> List.rev
-        
+
     byExt, top, byAuthor
 
 
@@ -55,7 +55,7 @@ let printMarkdown (logStats:IDictionary<Author, _>) (blameStats:BlameStats list)
     let h1, h2 =
         let h u x = printfn "%s\n%s" x <| String.replicate x.Length u
         (h "=" >> fun () -> printfn ""), h "-"
-    
+
     let contribByExt, topContribByExt, topContribByAuthor = aggregate blameStats
 
     logStats
@@ -63,17 +63,17 @@ let printMarkdown (logStats:IDictionary<Author, _>) (blameStats:BlameStats list)
     |> Seq.sortBy (fun (author, _) -> author.name)
     |> Seq.iter (fun (author, stats) ->
         sprintf "%s <%s>" author.name author.email |> h1
-        
+
         printfn "Commits: %i" stats.commits
         printfn "Active days: %i" stats.dates.Count
         printfn "Commits/active day: %f" (float stats.commits / float stats.dates.Count)
         printfn "First commit: %s" <| isoStr stats.first
         printfn "Last commit: %s" <| isoStr stats.last
-        
+
         let daysInvolved = (stats.last - stats.first).TotalDays
         printfn "Commits/day: %f" (float stats.commits / daysInvolved)
         printfn ""
-        
+
         stats.files
         |> Seq.iter (fun x ->
             let ext, stats = x.Key, x.Value
@@ -85,7 +85,7 @@ let printMarkdown (logStats:IDictionary<Author, _>) (blameStats:BlameStats list)
                 let contrib = contribByExt.[ext].[author]
                 printfn "Current lines: %i" contrib.lines
                 printfn "Current chars: %i" contrib.chars
-                
+
             printfn ""))
 
     if topContribByExt.Count > 0 then
@@ -102,7 +102,7 @@ let printMarkdown (logStats:IDictionary<Author, _>) (blameStats:BlameStats list)
                     x.Value.lines
                     x.Value.chars)
             printfn "")
-            
+
         h2 "Overall"
         topContribByAuthor
         |> Seq.iter (fun x ->

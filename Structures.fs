@@ -19,27 +19,35 @@ type DebugLevel =
         else Debug
 
 let debugLvl = ref Warn
-let debug, info, warn, error =
-    let synced = System.Console.Out |> System.IO.TextWriter.Synchronized
-        
-    let debug l x =
-        match l, !debugLvl with
-        | Warn, _
-        | Info, Info
-        | Info, Debug
-        | Debug, Debug ->
-            let time, ms =
-                let now = DateTime.Now
-                now.ToString ("yyyy-MM-dd HH:mm:ss"),
-                now.Millisecond.ToString ("000")
-            sprintf "[%A] [%i] - %s.%s - %s" l Threading.Thread.CurrentThread.ManagedThreadId time ms x
-            |> synced.WriteLine
-            
-        | _ -> ()
-    debug Debug,
-    debug Info,
-    debug Warn,
-    debug Warn
+let (debug : obj -> unit),
+    (info : obj -> unit),
+    (warn : obj -> unit),
+    (error : obj -> unit) =
+        let synced = System.Console.Out |> System.IO.TextWriter.Synchronized
+        let debug l (f:obj) =
+            match l, !debugLvl with
+            | Warn, _
+            | Info, Info
+            | Info, Debug
+            | Debug, Debug ->
+                let time, ms =
+                    let now = DateTime.Now
+                    now.ToString ("yyyy-MM-dd HH:mm:ss"),
+                    now.Millisecond.ToString ("000")
+                let str =
+                    match f with
+                    | :? string as x -> x
+                    | :? (unit -> string) as f -> f ()
+                    | :? Lazy<string> as x -> x.Force ()
+                    | _ -> failwith "Invalid logger argument."
+
+                sprintf "[%A] [%i] - %s.%s - %s" l Threading.Thread.CurrentThread.ManagedThreadId time ms str
+                |> synced.WriteLine
+            | _ -> ()
+        debug Debug,
+        debug Info,
+        debug Warn,
+        debug Warn
 
 type Change =
     | Added
@@ -56,7 +64,7 @@ type Hash = string
 [<CustomEquality; CustomComparison>]
 type Author =
     { name : string; email : string }
-    
+
     override x.Equals(y) =
         match y with
         | :? Author as y -> (x.email = y.email)
@@ -75,14 +83,14 @@ type FileChange =
       change : Change
       mode : string * string
       hash : Hash * Hash }
-      
+
 type FileStat =
     { path : string
       ext : string
       plus : int option
       minus : int option
       binary : bool }
-      
+
 type FileData =
     { path : string
       ext : string
@@ -92,7 +100,7 @@ type FileData =
       binary : bool
       plus : int option
       minus : int option }
-    
+
 type Part =
     | Commit of Hash
     | Author of Author
@@ -133,7 +141,7 @@ type Commit =
         let hash = ref ""
         let author = ref { name = ""; email = "" }
         let timestamp = ref DateTime.MinValue
-        
+
         let rec loop lst =
             match lst with
             | [] -> ()
