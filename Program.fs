@@ -432,16 +432,15 @@ let main args =
             Environment.Exit 2)
 
         let gitArgs = Args.joinedList "--" " "
-        let gitArgs = "log --all --raw --no-color --no-merges --numstat --ignore-space-change " + gitArgs
+        let gitArgs = "log --raw --no-color --no-merges --numstat --ignore-space-change " + gitArgs
 
         !workingDirs |> List.iter (run gitCmd gitArgs collectLogOutput)
 
         logParser.PostAndReply (fun ch -> Finished, Some ch)
 
-    let toParser (p:MailboxProcessor<_ * _>) (x:string) =
-        x.Split ([|"\n".[0]|]) |> Array.iter (fun x -> p.Post (Data x, None))
-
     let analyzeBlame wd path =
+        let toParser (p:MailboxProcessor<_ * _>) (x:string) =
+            x.Split ([|"\n".[0]|]) |> Array.iter (fun x -> p.Post (Data x, None))
         let ext = getExt path
         match inclExt ext with
         | false -> []
