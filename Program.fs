@@ -95,7 +95,7 @@ let commitCollector =
                               first = commit.timestamp.Date
                               last = commit.timestamp.Date
                               files = Dictionary<_,_> (files) }),
-                        Func<_,_,_>(fun (_, x) -> (fun x ->
+                        Func<_,_,_>(fun _ -> (fun x ->
                             { commits = x.commits + 1
                               dates = x.dates |> Set.add commit.timestamp.Date
                               first = commit.timestamp.Date
@@ -135,7 +135,7 @@ let parseLog data =
                     sprintf "    real email: %s" aliases.[email] |> debug
                     aliases.[email]
                 else email
-            Author (name, email)
+            Author { name = name; email = email }
         | Regex @"^Date:\s+(.+?) (.+?) (\d+) (\d{2}:\d{2}:\d{2}) (\d+) ([-+]\d{2})(\d{2})" [ dow; mon; day; time; year; offsetH; offsetM ] ->
             let dateStr =
                 sprintf "%s %s %s %s %s %s:%s"
@@ -283,7 +283,11 @@ let createBlameParser path =
             
             match !chars with
             | 0 -> None
-            | _ -> Some ({ author = !name, !email; lines = !lines; chars = !chars } : BlameLines)
+            | _ ->
+                ({ author = { name = !name; email = !email }
+                   lines = !lines
+                   chars = !chars } : BlameLines)
+                |> Some
     
         let rec loop parts lines = async {
             let! msg, (replyChan : AsyncReplyChannel<BlameStats list> option) = inbox.Receive ()

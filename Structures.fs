@@ -52,7 +52,22 @@ type Change =
         | x -> failwithf "Unknown change %s" x
 
 type Hash = string
-type Author = string * string
+
+[<CustomEquality; CustomComparison>]
+type Author =
+    { name : string; email : string }
+    
+    override x.Equals(y) =
+        match y with
+        | :? Author as y -> (x.email = y.email)
+        | _ -> false
+
+    override x.GetHashCode() = hash x.email
+    interface System.IComparable with
+      member x.CompareTo y =
+          match y with
+          | :? Author as y -> compare x.email y.email
+          | _ -> invalidArg "y" "cannot compare values of different types"
 
 type FileChange =
     { path : string
@@ -108,7 +123,7 @@ let (|Regex|_|) regex str =
 
 type Commit =
     { hash : Hash
-      author : string * string
+      author : Author
       timestamp : DateTime
       message : string
       files : FileData list }
@@ -116,7 +131,7 @@ type Commit =
         let msgBuilder = Text.StringBuilder ()
         let files = Dictionary<string, FileData> ()
         let hash = ref ""
-        let author = ref ("", "")
+        let author = ref { name = ""; email = "" }
         let timestamp = ref DateTime.MinValue
         
         let rec loop lst =
@@ -125,7 +140,7 @@ type Commit =
             | x::xs ->
                 match x with
                 | Commit x -> hash := x
-                | Author (name, email) -> author := (name, email)
+                | Author x -> author := x
                 | Timestamp x -> timestamp := x
                 | Message x -> msgBuilder.AppendLine x |> ignore
                 | File x ->
