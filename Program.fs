@@ -342,7 +342,7 @@ let buildOutputHandler f =
 
 let collectLogOutput = buildOutputHandler logParser.Post
 
-let run wd cmd args (outputHandler:DataReceivedEventArgs -> unit) =
+let run cmd args (outputHandler:DataReceivedEventArgs -> unit) wd =
     sprintf "%s %s" cmd args |> debug
 
     let psi = ProcessStartInfo ()
@@ -373,7 +373,7 @@ let run wd cmd args (outputHandler:DataReceivedEventArgs -> unit) =
         proc.StandardError.ReadToEnd () |> error
         Environment.Exit x
 
-let runBuf wd cmd args =
+let runBuf cmd args wd =
     sprintf "%s %s" cmd args |> debug
 
     let psi = ProcessStartInfo ()
@@ -412,13 +412,14 @@ let main args =
         
     sprintf "Arguments: %A" Args.parsedArgs |> debug
 
-    let workingDir = Args.singleOrEmpty "" Environment.CurrentDirectory
-    let gitCmd = Args.singleOrEmpty "git" "/usr/local/bin/git"
-    let run = run workingDir gitCmd
-    
+    let workingDirs = ref [ Environment.CurrentDirectory ]
+
+    Args.listOrEmpty "" (fun x -> workingDirs := x |> Set.ofList |> Set.toList)
     Args.pairsOrEmpty "aliases" (fun x -> aliases <- Map.ofList x )
     Args.listOrEmpty "exclude" (fun x -> skipExts <- x)
     Args.listOrEmpty "include" (fun x -> inclExts <- x)
+
+    let gitCmd = Args.singleOrEmpty "git" "/usr/local/bin/git"
     let parallelism = int <| Args.singleOrEmpty "parallel" "-1"
                 
     let logOnly = Args.bool "logonly"
@@ -436,25 +437,25 @@ let main args =
         let gitArgs = Args.joinedList "--" " "
         let gitArgs = "log --all --raw --no-color --no-merges --numstat --ignore-space-change " + gitArgs
     
-        run gitArgs collectLogOutput
+        !workingDirs |> List.iter (run gitCmd gitArgs collectLogOutput)
         
         logParser.PostAndReply (fun ch -> Finished, Some ch)
     
     let toParser (p:MailboxProcessor<_ * _>) (x:string) =
         x.Split ([|"\n".[0]|]) |> Array.iter (fun x -> p.Post (Data x, None))
     
-    let analyzeBlame path =
+    let analyzeBlame wd path =
         let ext = getExt path
         match inclExt ext with
         | false -> []
         | _ ->
             sprintf "Analyzing blame for %s" path |> debug
-            let output = runBuf workingDir gitCmd (sprintf "blame --porcelain -w -- %s" ("\"" + path + "\""))
+            let output = runBuf gitCmd (sprintf "blame --porcelain -w -- %s" ("\"" + path + "\"")) wd
             let parser = createBlameParser path
             output |> toParser parser
             parser.PostAndReply (fun ch -> Finished, Some ch)            
         
-    let analyzeTree () =
+    let analyzeTree wd =
         let parse x =
             match x with
             | Regex @"^(\d+|-)\s+(?:\d+|-)\s+(.+?)\s*$" [ size; path ] ->
@@ -462,14 +463,14 @@ let main args =
                 match size with
                 | "-" -> "    is binary" |> debug; None
                 | _ ->
-                    match IO.Directory.Exists <| IO.Path.Combine (workingDir, path) with
+                    match IO.Directory.Exists <| IO.Path.Combine (wd, path) with
                     | false -> Some path
                     | _ -> "    is directory" |> debug; None
             | "" -> None
             | _ -> failwith "Could not parse ls."
 
     
-        let output = runBuf workingDir gitCmd "diff-tree --numstat 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD"
+        let output = runBuf gitCmd "diff-tree --numstat 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD" wd
         
         let lines =
             let i = ref 0
@@ -487,7 +488,7 @@ let main args =
                     .AsParallel()
                     .WithDegreeOfParallelism(parallelize)
                     .WithExecutionMode(ParallelExecutionMode.ForceParallelism)
-                    .Select(analyzeBlame)
+                    .Select(analyzeBlame wd)
                 |> Seq.concat
                 |> Seq.toList)
             
@@ -498,12 +499,19 @@ let main args =
         let analyzeLog () = activity := analyzeLog ()
         
         let lines : BlameStats list ref = ref []
-        let analyzeTree () = lines := analyzeTree ()
+        let analyzeTree () =
+            let rec loop lst acc =
+                match lst with
+                | [] -> acc
+                | x::xs ->
+                    loop xs <| analyzeTree x @ acc
+            
+            lines := loop !workingDirs []
     
         match logOnly, blameOnly with
-        | true, false -> [analyzeLog]
-        | false, true -> [analyzeTree]
-        | _ -> [analyzeLog; analyzeTree]
+        | true, false -> [ analyzeLog ]
+        | false, true -> [ analyzeTree ]
+        | _ -> [ analyzeLog; analyzeTree ]
         |> Seq.iter (fun x -> x ())
         |> ignore
         

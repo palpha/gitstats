@@ -9,6 +9,7 @@ let aggregate blameStats =
     let byExt =
         blameStats
         |> Seq.groupBy (fun x -> x.ext)
+        |> Seq.sortBy (fun (ext, _) -> ext)
         |> Seq.map (fun (ext, xs) ->
             ext,
             xs
@@ -25,7 +26,13 @@ let aggregate blameStats =
 
     let top =
         byExt
-        |> Seq.map (fun x -> x.Key, x.Value |> Seq.maxBy (fun x -> x.Value.chars))
+        |> Seq.map (fun x ->
+            x.Key,
+            x.Value
+            |> Seq.sortBy (fun x -> x.Value.chars)
+            |> Seq.toList
+            |> List.rev
+            |> Seq.take (min 3 x.Value.Count))
         |> dict
                     
     let byAuthor =
@@ -87,11 +94,13 @@ let printMarkdown (logStats:IDictionary<Author, _>) (blameStats:BlameStats list)
         topContribByExt
         |> Seq.iter (fun x ->
             sprintf ".%s" x.Key |> h2
-            let author = x.Value.Key
-            printfn "%s <%s>: %i lines, %i chars"
-                author.name author.email
-                x.Value.Value.lines
-                x.Value.Value.chars
+            x.Value
+            |> Seq.iter (fun x ->
+                let author = x.Key
+                printfn "%s <%s>: %i lines, %i chars"
+                    author.name author.email
+                    x.Value.lines
+                    x.Value.chars)
             printfn "")
             
         h2 "Overall"
