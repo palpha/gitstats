@@ -46,5 +46,6 @@
     <Compile Include="Args.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
-  <Import Project="$(MSBuildExtensionsPath32)\..\Microsoft F#\v4.0\Microsoft.FSharp.Targets" />
+  <Import Project="$(FSharpTargetsPath)\Microsoft.FSharp.Targets" Condition="Exists('$(FSharpTargetsPath)\Microsoft.FSharp.Targets')" />
+  <Import Project="$(MSBuildExtensionsPath32)\..\Microsoft F#\v4.0\Microsoft.FSharp.Targets" Condition="Exists('$(MSBuildExtensionsPath32)\..\Microsoft F#\v4.0\Microsoft.FSharp.Targets')" />
 </Project>
