@@ -1,7 +1,7 @@
 ﻿
-Microsoft Visual Studio Solution File, Format Version 11.00
-# Visual Studio 2010
-Project("{4925A630-B079-445d-BCD4-3A9C94FE9307}") = "GitStats", "GitStats.fsproj", "{2DF6B104-BD7E-4834-9BEC-8828893EFE72}"
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio 2012
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "GitStats", "GitStats.fsproj", "{2DF6B104-BD7E-4834-9BEC-8828893EFE72}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -13,6 +13,9 @@ Global
 		{2DF6B104-BD7E-4834-9BEC-8828893EFE72}.Debug|x86.Build.0 = Debug|x86
 		{2DF6B104-BD7E-4834-9BEC-8828893EFE72}.Release|x86.ActiveCfg = Release|x86
 		{2DF6B104-BD7E-4834-9BEC-8828893EFE72}.Release|x86.Build.0 = Release|x86
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(MonoDevelopProperties) = preSolution
 		StartupItem = GitStats.fsproj

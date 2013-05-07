@@ -62,7 +62,7 @@ let printMarkdown (logStats:IDictionary<Author, _>) (blameStats:BlameStats list)
     |> Seq.map (fun x -> x.Key, x.Value)
     |> Seq.sortBy (fun (author, _) -> author.name)
     |> Seq.iter (fun (author, stats) ->
-        sprintf "%s <%s>" author.name author.email |> h1
+        sprintf "%s <<%s>>" author.name author.email |> h1
 
         printfn "Commits: %i" stats.commits
         printfn "Active days: %i" stats.dates.Count
@@ -97,7 +97,7 @@ let printMarkdown (logStats:IDictionary<Author, _>) (blameStats:BlameStats list)
             x.Value
             |> Seq.iter (fun x ->
                 let author = x.Key
-                printfn "%s <%s>: %i lines, %i chars"
+                printfn "%s <<%s>>: %i lines, %i chars"
                     author.name author.email
                     x.Value.lines
                     x.Value.chars)
@@ -106,7 +106,7 @@ let printMarkdown (logStats:IDictionary<Author, _>) (blameStats:BlameStats list)
         h2 "Overall"
         topContribByAuthor
         |> Seq.iter (fun x ->
-            printfn "%s <%s>: %i lines, %i chars"
+            printfn "%s <<%s>>: %i lines, %i chars"
                 x.author.name
                 x.author.email
                 x.lines

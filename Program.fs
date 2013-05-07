@@ -7,14 +7,28 @@ open System.Collections.Concurrent
 open Microsoft.FSharp
 open System.Threading
 open System.Linq
+open System.Text.RegularExpressions
 
 // some options:
 let mutable doTime = false
 let mutable aliases = Map.empty
 let mutable skipExts = List.empty
 let mutable inclExts = List.empty
+let mutable ignored = List.empty
 
-// answers
+let inclPath =
+    let regexes = lazy (
+        ignored
+        |> List.map (fun x ->
+            Regex (x, RegexOptions.Compiled ||| RegexOptions.ECMAScript ||| RegexOptions.IgnoreCase))
+    )
+
+    fun path ->
+        if ignored.Length > 0 then
+            regexes.Force ()
+            |> List.forall (fun re -> re.IsMatch (path) = false)
+        else true
+
 let inclExt =
     let inclSet = lazy (inclExts |> set)
     let skipSet = lazy (skipExts |> set)
@@ -154,7 +168,7 @@ let parseLog data =
         | Regex @"^:(\d+) (\d+) ([\da-f\.]+) ([\da-f\.]+) ([AMD])\s+(.+?)\s*$" [ modeB; modeA; hashB; hashA; change; path ] ->
             debug <| lazy (sprintf "  parsed file %s" path)
             let ext = getExt path
-            match inclExt ext with
+            match inclExt ext && inclPath path with
             | false -> Part.Blank
             | _ -> File { path = path.Trim (); ext = ext; change = Change.parse change; mode = modeB, modeA; hash = hashB, hashA }
         | Regex @"^(\d+|-)\s+(\d+|-)\s+(.+?)\s*$" [ plus; minus; path ] ->
@@ -164,7 +178,7 @@ let parseLog data =
                 | x -> Some <| int x
 
             let ext = getExt path
-            match inclExt ext with
+            match inclExt ext && inclPath path with
             | false -> Part.Blank
             | _ ->
                 let plus = parseNum plus
@@ -304,7 +318,15 @@ let createBlameParser path =
 
                         name :: [], lines
 
-                    | Regex @"^author-mail <(.+?)>\s*$" [ email ] -> Email email :: parts, lines
+                    | Regex @"^author-mail <(.+?)>\s*$" [ email ] ->
+                        let email =
+                            if aliases.ContainsKey email
+                            then
+                                debug <| lazy (sprintf "  real email: %s" aliases.[email])
+                                aliases.[email]
+                            else email
+                    
+                        Email email :: parts, lines
                     | Regex @"^\t(.+?)\s*$" [ line ] -> Line line :: parts, lines
                     | _ -> parts, lines
 
@@ -415,6 +437,7 @@ let main args =
     Args.pairsOrEmpty "aliases" (fun x -> aliases <- Map.ofList x )
     Args.listOrEmpty "exclude" (fun x -> skipExts <- x)
     Args.listOrEmpty "include" (fun x -> inclExts <- x)
+    Args.listOrEmpty "ignore" (fun x -> ignored <- x)
 
     let gitCmd = Args.singleOrEmpty "git" "/usr/local/bin/git"
     let parallelism = int <| Args.singleOrEmpty "parallel" "-1"
@@ -442,7 +465,7 @@ let main args =
         let toParser (p:MailboxProcessor<_ * _>) (x:string) =
             x.Split ([|"\n".[0]|]) |> Array.iter (fun x -> p.Post (Data x, None))
         let ext = getExt path
-        match inclExt ext with
+        match inclExt ext && inclPath path with
         | false -> []
         | _ ->
             debug <| lazy (sprintf "Analyzing blame for %s" path)
