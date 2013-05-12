@@ -205,3 +205,12 @@ type BlameStats =
       ext : string
       lines : int
       chars : int }
+
+type Long = string
+type Short = string option
+type Arg =
+    | Flag of Long * Short
+    | SingleOrDefault of Long * Short * string
+    | ListOrEmpty of Long * Short
+    | ListOrDefault of Long * Short * string list
+    | PairsOrEmpty of Long * Short

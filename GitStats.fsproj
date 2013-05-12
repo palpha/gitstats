@@ -43,6 +43,7 @@
     <Compile Include="Structures.fs" />
     <Compile Include="Testing.fsx" />
     <Compile Include="Printers.fs" />
+    <Compile Include="Resources.fs" />
     <Compile Include="Args.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>

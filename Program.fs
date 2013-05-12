@@ -422,28 +422,40 @@ let runBuf cmd args wd =
 
 [<EntryPoint>]
 let main args =
-    Args.parse args
-    doTime <- Args.bool "time"
-    Args.singleOrFlag
-        "debug"
-        (fun x -> debugLvl := DebugLevel.parse x)
-        (fun () -> debugLvl := DebugLevel.Debug)
+    let spec =
+        [ListOrDefault ("", None, [ Environment.CurrentDirectory ]), "ArgPaths"
+         SingleOrDefault ("git", Some "g", "/usr/local/bin/git"), "ArgGit"
+         ListOrEmpty ("include-ext", Some "i"), "ArgInclude"
+         ListOrEmpty ("exclude-ext", Some "x"), "ArgExclude"
+         PairsOrEmpty ("aliases", None), "ArgAliases"
+         ListOrEmpty ("ignore", None), "ArgIgnore"
+         SingleOrDefault ("parallel", None, "-1"), "ArgParallel"
+         SingleOrDefault ("loglevel", Some "ll", "warn"), "ArgLogLevel"
+         Flag ("log-only", None), "ArgLogOnly"
+         Flag ("blame-only", None), "ArgBlameOnly"
+         Flag ("time", None), "ArgTime"
+         ListOrEmpty ("--", None), "ArgGitArgs"]
 
-    debug <| lazy (sprintf "Arguments: %A" Args.parsedArgs)
+    let args = Args.parse spec args
 
-    let workingDirs = ref [ Environment.CurrentDirectory ]
+    debugLvl := DebugLevel.parse <| unbox args.["loglevel"]
+    warn <| lazy (sprintf "Arguments: %A" args)
 
-    Args.listOrEmpty "" (fun x -> workingDirs := x |> Set.ofList |> Set.toList)
-    Args.pairsOrEmpty "aliases" (fun x -> aliases <- Map.ofList x )
-    Args.listOrEmpty "exclude" (fun x -> skipExts <- x)
-    Args.listOrEmpty "include" (fun x -> inclExts <- x)
-    Args.listOrEmpty "ignore" (fun x -> ignored <- x)
+    doTime <- unbox args.["time"]
+    aliases <-
+        match unbox args.["aliases"] with
+        | [] -> Map.empty
+        | x -> Map.ofList x
+    skipExts <- unbox args.["exclude-ext"]
+    inclExts <- unbox args.["include-ext"]
+    ignored <- unbox args.["ignore"]
 
-    let gitCmd = Args.singleOrEmpty "git" "/usr/local/bin/git"
-    let parallelism = int <| Args.singleOrEmpty "parallel" "-1"
-
-    let logOnly = Args.bool "logonly"
-    let blameOnly = Args.bool "blameonly"
+    let workingDirs : string list = unbox args.[""] |> Set.ofList |> Seq.toList
+    let gitCmd : string = unbox args.["git"]
+    let parallelism = int <| unbox<string> args.["parallel"]
+    let logOnly : bool = unbox args.["log-only"]
+    let blameOnly : bool = unbox args.["blame-only"]
+    let gitArgs = String.Join<string> (" ", unbox args.["--"])
 
     let analyzeLog () =
         commitCollector.Error.Add (fun e ->
@@ -454,10 +466,9 @@ let main args =
             sprintf "Parser failed: %A" e |> error
             Environment.Exit 2)
 
-        let gitArgs = Args.joinedList "--" " "
         let gitArgs = "log --raw --no-color --no-merges --numstat --ignore-space-change " + gitArgs
 
-        !workingDirs |> List.iter (run gitCmd gitArgs collectLogOutput)
+        workingDirs |> List.iter (run gitCmd gitArgs collectLogOutput)
 
         logParser.PostAndReply (fun ch -> Finished, Some ch)
 
@@ -525,7 +536,7 @@ let main args =
                 | x::xs ->
                     loop xs <| analyzeTree x @ acc
 
-            lines := loop !workingDirs []
+            lines := loop workingDirs []
 
         match logOnly, blameOnly with
         | true, false -> [ analyzeLog ]
