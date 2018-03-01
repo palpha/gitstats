@@ -133,7 +133,10 @@ let parse spec args =
                 | PairsOrEmpty (l, s) ->
                     match pop l s with
                     | Some x ->
-                        let pairs = x |> Seq.pairwise |> Seq.toList
+                        let pairs =
+                            x |> Seq.chunkBySize 2
+                                |> Seq.map (fun x -> x.[0], x.[1])
+                                |> Seq.toList
                         (l, box pairs)
                     | _ -> (l, box ([] : (string * string) list))
             loop xs <| value :: acc
