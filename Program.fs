@@ -109,8 +109,14 @@ let commitCollector =
                         Func<_,_,_>(fun _ -> (fun x ->
                             { commits = x.commits + 1
                               dates = x.dates |> Set.add commit.timestamp.Date
-                              first = commit.timestamp.Date
-                              last = x.last
+                              first =
+                                if commit.timestamp.Date < x.first then
+                                    commit.timestamp.Date
+                                else x.first
+                              last =
+                                if commit.timestamp.Date > x.last then
+                                    commit.timestamp.Date
+                                else x.last
                               files =
                                 x.files.Keys
                                 |> Seq.append files.Keys
